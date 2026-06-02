@@ -1,0 +1,170 @@
+name: Build & Publish Dalamud (estell)
+
+# rioriopu/Dalamud をビルドし、estell-dalamud-distrib へ配布(Release zip + version/meta 更新)する。
+# パッチ当日は「Run workflow」から game_version と dalamud_ref を指定して実行する。
+
+on:
+  workflow_dispatch:
+    inputs:
+      game_version:
+        description: '対応ゲームバージョン (例: 2026.06.02.0000.0000)。空なら config.yaml の applicableGameVersion を使用'
+        required: false
+        default: ''
+      dalamud_ref:
+        description: 'ビルドする rioriopu/Dalamud の ref (branch/tag/sha)'
+        required: false
+        default: 'master'
+      track:
+        description: '配信トラック名'
+        required: false
+        default: 'estell'
+
+env:
+  DISTRIB_REPO: rioriopu/estell-dalamud-distrib
+  DALAMUD_REPO: rioriopu/Dalamud
+
+jobs:
+  build-publish:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout declarative (config)
+        uses: actions/checkout@v4
+        with:
+          path: declarative
+
+      - name: Checkout Dalamud fork
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DALAMUD_REPO }}
+          ref: ${{ inputs.dalamud_ref }}
+          submodules: recursive
+          fetch-depth: 0
+          path: Dalamud
+
+      - name: Checkout distrib (write target)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DISTRIB_REPO }}
+          token: ${{ secrets.DISTRIB_PAT }}
+          path: distrib
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build Dalamud (Release)
+        working-directory: Dalamud
+        shell: pwsh
+        run: .\build.ps1 Compile --configuration Release
+
+      - name: Create hash list
+        working-directory: Dalamud
+        shell: pwsh
+        run: .\CreateHashList.ps1 .\bin\Release
+
+      - name: Package latest.zip
+        working-directory: Dalamud
+        shell: pwsh
+        run: Compress-Archive -Path .\bin\Release\* -DestinationPath "$env:GITHUB_WORKSPACE\latest.zip" -Force
+
+      - name: Generate version / meta
+        id: gen
+        shell: pwsh
+        run: |
+          $track = "${{ inputs.track }}"
+          if ([string]::IsNullOrWhiteSpace($track)) { $track = "estell" }
+
+          # --- config.yaml 読み込み ---
+          Install-Module powershell-yaml -Force -Scope CurrentUser -AllowClobber | Out-Null
+          Import-Module powershell-yaml
+          $cfg = Get-Content "declarative/config.yaml" -Raw | ConvertFrom-Yaml
+          $tc = $cfg.tracks[$track]
+          if ($null -eq $tc) { throw "config.yaml に track '$track' がありません" }
+
+          $key  = [string]$tc.key
+          $rv   = [string]$tc.runtimeVersion
+          $rreq = [bool]$tc.runtimeRequired
+          $disp = [string]$tc.displayName
+          $desc = [string]$tc.description
+          $hidden = [bool]$tc.hidden
+
+          $gv = "${{ inputs.game_version }}"
+          if ([string]::IsNullOrWhiteSpace($gv)) { $gv = [string]$tc.applicableGameVersion }
+
+          # --- バージョン算出 ---
+          # 公式と同じ規則 `git describe --tags --long`(= {最新タグ}-{タグからのコミット数}-g{短縮ハッシュ})
+          # を採用しつつ、公式とフォルダ衝突しないよう末尾に estell マーカー(+ run番号)を付与する。
+          try {
+            $describe = (git -C Dalamud describe --tags --long).Trim()
+          } catch {
+            # タグが無い場合のフォールバック(csproj のバージョン + 短縮ハッシュ)
+            $csproj = Get-Content "Dalamud/Dalamud/Dalamud.csproj" -Raw
+            $baseVer = [regex]::Match($csproj, '<DalamudVersion>(.*?)</DalamudVersion>').Groups[1].Value
+            $sha = (git -C Dalamud rev-parse --short HEAD).Trim()
+            $describe = "$baseVer-0-g$sha"
+          }
+          $ver = "$describe-$track.$($env:GITHUB_RUN_NUMBER)"
+
+          $dl = "https://github.com/$($env:DISTRIB_REPO)/releases/download/$track/latest.zip"
+
+          # --- {track}/version (PascalCase, DalamudVersionInfo) ---
+          $versionObj = [ordered]@{
+            Track           = $track
+            AssemblyVersion = $ver
+            SupportedGameVer = $gv
+            RuntimeVersion  = $rv
+            RuntimeRequired = $rreq
+            Key             = $key
+            DownloadUrl     = $dl
+          }
+          New-Item -ItemType Directory -Force "distrib/$track" | Out-Null
+          ($versionObj | ConvertTo-Json -Compress) | Out-File -Encoding utf8 -NoNewline "distrib/$track/version"
+
+          # --- meta.json (camelCase, ブランチ辞書) ---
+          $metaObj = [ordered]@{
+            $track = [ordered]@{
+              displayName = $disp
+              description = $desc
+              track       = $track
+              hidden      = $hidden
+              key         = $key
+              assemblyVersion = $ver
+              runtimeVersion  = $rv
+              runtimeRequired = $rreq
+              supportedGameVer = $gv
+              isApplicableForCurrentGameVer = $true
+            }
+          }
+          ($metaObj | ConvertTo-Json -Depth 5) | Out-File -Encoding utf8 "distrib/meta.json"
+
+          "track=$track"  >> $env:GITHUB_OUTPUT
+          "version=$ver"  >> $env:GITHUB_OUTPUT
+          "gamever=$gv"   >> $env:GITHUB_OUTPUT
+          Write-Host "Generated $track version=$ver gamever=$gv"
+
+      - name: Upload zip to distrib release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.DISTRIB_PAT }}
+        run: |
+          $track = "${{ steps.gen.outputs.track }}"
+          $ver   = "${{ steps.gen.outputs.version }}"
+          gh release view $track --repo $env:DISTRIB_REPO 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $track --repo $env:DISTRIB_REPO --title "estell $track" --notes "Auto-published by build-and-publish.yml"
+          }
+          gh release upload $track "$env:GITHUB_WORKSPACE\latest.zip" --clobber --repo $env:DISTRIB_REPO
+
+      - name: Commit & push distrib (version / meta)
+        working-directory: distrib
+        shell: bash
+        run: |
+          git config user.name "rioriopu"
+          git config user.email "rioriopuu@gmail.com"
+          git add -A
+          git commit -m "estell: publish ${{ steps.gen.outputs.version }} for ${{ steps.gen.outputs.gamever }}" || echo "no changes"
+          git push
