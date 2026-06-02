@@ -1,0 +1,22 @@
+# estell 配布トラック定義(goatcorp/dalamud-declarative 相当の唯一の真実)。
+# build-and-publish.yml がこの値を読み、estell-dalamud-distrib の
+# meta.json / {track}/version を生成する。
+tracks:
+
+  estell:
+    # ベータキー(利用者が XIVLauncher の「Have a beta key?」で入力する)。
+    # meta.json / version の Key にそのまま反映される。必ず変更すること。
+    key: "estell-beta-key"
+
+    # 対応ゲームバージョン(SupportedGameVer)。パッチ当日に更新、
+    # もしくは Action 実行時の game_version 入力で上書きする。
+    applicableGameVersion: '2026.05.01.0000.0000'
+
+    # .NET ランタイム。公式と同じ値にすれば kamori からそのまま取得される。
+    runtimeVersion: 10.0.0
+    runtimeRequired: true
+
+    # 自前トラックは常にベータキー必須(launcher 側で hidden 扱い)。
+    hidden: true
+    displayName: "estell (自前対応版)"
+    description: "FF14パッチ当日の自前対応版 Dalamud。ベータキー必須。"
