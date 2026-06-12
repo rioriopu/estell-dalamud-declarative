@@ -10,7 +10,7 @@ tracks:
 
     # 対応ゲームバージョン(SupportedGameVer)。パッチ当日に更新、
     # もしくは Action 実行時の game_version 入力で上書きする。
-    applicableGameVersion: '2026.05.25.0000.0000'
+    applicableGameVersion: '2026.06.10.0000.0000'
 
     # .NET ランタイム。公式と同じ値にすれば kamori からそのまま取得される。
     runtimeVersion: 10.0.0
