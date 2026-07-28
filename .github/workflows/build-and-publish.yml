@@ -18,6 +18,10 @@ on:
         description: '配信トラック名'
         required: false
         default: 'estell'
+      estell_build:
+        description: 'estell ビルド番号(例: 8)。空なら Actions の run 番号を使用。run 番号がリセットされた場合に前回より大きい値を明示指定する'
+        required: false
+        default: ''
 
 env:
   DISTRIB_REPO: rioriopu/estell-dalamud-distrib
@@ -107,7 +111,11 @@ jobs:
             $sha = (git -C Dalamud rev-parse --short HEAD).Trim()
             $describe = "$baseVer-0-g$sha"
           }
-          $ver = "$describe-$track.$($env:GITHUB_RUN_NUMBER)"
+          # estell ビルド番号。既定は Actions の run 番号だが、run 番号がリセットされると
+          # 過去の配布より小さい番号になり紛らわしいため、入力で明示指定できるようにする。
+          $buildNo = "${{ inputs.estell_build }}"
+          if ([string]::IsNullOrWhiteSpace($buildNo)) { $buildNo = $env:GITHUB_RUN_NUMBER }
+          $ver = "$describe-$track.$buildNo"
 
           $dl = "https://github.com/$($env:DISTRIB_REPO)/releases/download/$track/latest.zip"
 
