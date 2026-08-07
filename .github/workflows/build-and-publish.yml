@@ -60,9 +60,39 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # バージョンはビルドより前に決める。Dalamud 内部の SCMVersion に同じ値を埋め込まないと、
+      # 配布マニフェストの AssemblyVersion(末尾に -estell.N が付く)と食い違い、
+      # プラグインインストーラが「新しいバージョンがあります」と誤表示するため。
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $track = "${{ inputs.track }}"
+          if ([string]::IsNullOrWhiteSpace($track)) { $track = "estell" }
+
+          try {
+            $describe = (git -C Dalamud describe --tags --long).Trim()
+          } catch {
+            $csproj = Get-Content "Dalamud/Dalamud/Dalamud.csproj" -Raw
+            $baseVer = [regex]::Match($csproj, '<DalamudVersion>(.*?)</DalamudVersion>').Groups[1].Value
+            $sha = (git -C Dalamud rev-parse --short HEAD).Trim()
+            $describe = "$baseVer-0-g$sha"
+          }
+
+          $buildNo = "${{ inputs.estell_build }}"
+          if ([string]::IsNullOrWhiteSpace($buildNo)) { $buildNo = $env:GITHUB_RUN_NUMBER }
+
+          "track=$track"                    >> $env:GITHUB_OUTPUT
+          "version=$describe-$track.$buildNo" >> $env:GITHUB_OUTPUT
+          Write-Host "Resolved version = $describe-$track.$buildNo"
+
       - name: Build Dalamud (Release)
         working-directory: Dalamud
         shell: pwsh
+        env:
+          # MSBuild は環境変数をプロパティとして解決する。Dalamud.csproj の GetVersionData は
+          # SCMVersion が空のときだけ git describe を使うので、ここで渡した値が優先される。
+          SCMVersion: ${{ steps.ver.outputs.version }}
         run: .\build.ps1 Compile --configuration Release
 
       - name: Create hash list
@@ -99,23 +129,10 @@ jobs:
           $gv = "${{ inputs.game_version }}"
           if ([string]::IsNullOrWhiteSpace($gv)) { $gv = [string]$tc.applicableGameVersion }
 
-          # --- バージョン算出 ---
-          # 公式と同じ規則 `git describe --tags --long`(= {最新タグ}-{タグからのコミット数}-g{短縮ハッシュ})
-          # を採用しつつ、公式とフォルダ衝突しないよう末尾に estell マーカー(+ run番号)を付与する。
-          try {
-            $describe = (git -C Dalamud describe --tags --long).Trim()
-          } catch {
-            # タグが無い場合のフォールバック(csproj のバージョン + 短縮ハッシュ)
-            $csproj = Get-Content "Dalamud/Dalamud/Dalamud.csproj" -Raw
-            $baseVer = [regex]::Match($csproj, '<DalamudVersion>(.*?)</DalamudVersion>').Groups[1].Value
-            $sha = (git -C Dalamud rev-parse --short HEAD).Trim()
-            $describe = "$baseVer-0-g$sha"
-          }
-          # estell ビルド番号。既定は Actions の run 番号だが、run 番号がリセットされると
-          # 過去の配布より小さい番号になり紛らわしいため、入力で明示指定できるようにする。
-          $buildNo = "${{ inputs.estell_build }}"
-          if ([string]::IsNullOrWhiteSpace($buildNo)) { $buildNo = $env:GITHUB_RUN_NUMBER }
-          $ver = "$describe-$track.$buildNo"
+          # --- バージョン ---
+          # Resolve version ステップで決めた値をそのまま使う(ビルド時の SCMVersion と同一)。
+          $ver = "${{ steps.ver.outputs.version }}"
+          if ([string]::IsNullOrWhiteSpace($ver)) { throw "バージョンが解決できていません" }
 
           $dl = "https://github.com/$($env:DISTRIB_REPO)/releases/download/$track/latest.zip"
 
