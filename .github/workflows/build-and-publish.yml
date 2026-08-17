@@ -193,3 +193,52 @@ jobs:
           git add -A
           git commit -m "estell: publish ${{ steps.gen.outputs.version }} for ${{ steps.gen.outputs.gamever }}" || echo "no changes"
           git push
+
+      # GitHub が落ちても配れるよう、自前 VPS にも同じものを置く。
+      # ここが失敗しても GitHub 側の配布は完了しているので、ジョブは落とさない
+      # (continue-on-error)。ミラーが古いままになるだけ。
+      - name: Mirror to VPS
+        continue-on-error: true
+        shell: bash
+        env:
+          VPS_TARGET: ${{ secrets.VPS_TARGET }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          MIRROR_DIR: /home/ubuntu/estelld-repo/static/estell
+        run: |
+          set -euo pipefail
+
+          if [ -z "${VPS_SSH_KEY:-}" ] || [ -z "${VPS_TARGET:-}" ]; then
+            echo "VPS の Secrets が未設定のためミラーをスキップします"
+            exit 0
+          fi
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_mirror
+          chmod 600 ~/.ssh/id_mirror
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+          SSH="ssh -i $HOME/.ssh/id_mirror -o BatchMode=yes -o ConnectTimeout=30"
+          SCP="scp -i $HOME/.ssh/id_mirror -o BatchMode=yes -o ConnectTimeout=30"
+
+          $SSH "$VPS_TARGET" "mkdir -p $MIRROR_DIR/dalamud"
+
+          # マニフェスト(数百バイト)。今回の障害で唯一落ちていた部分なので最優先。
+          $SCP distrib/estell/version   "$VPS_TARGET:$MIRROR_DIR/dalamud/version"
+          $SCP distrib/meta.json        "$VPS_TARGET:$MIRROR_DIR/dalamud/meta.json"
+
+          # Dalamud 本体。GitHub Releases が落ちたときの代替。
+          $SCP "$GITHUB_WORKSPACE/latest.zip" "$VPS_TARGET:$MIRROR_DIR/dalamud/latest.zip"
+
+          # 転送事故を検出する(100MB 級なので必ず照合する)
+          LOCAL=$(sha256sum "$GITHUB_WORKSPACE/latest.zip" | cut -d' ' -f1)
+          REMOTE=$($SSH "$VPS_TARGET" "sha256sum $MIRROR_DIR/dalamud/latest.zip | cut -d' ' -f1")
+          echo "local =$LOCAL"
+          echo "remote=$REMOTE"
+          [ "$LOCAL" = "$REMOTE" ] || { echo "ハッシュ不一致"; exit 1; }
+
+          $SSH "$VPS_TARGET" "date -Is > $MIRROR_DIR/dalamud/last-sync.txt"
+          echo "ミラー同期が完了しました"
+
+          rm -f ~/.ssh/id_mirror
