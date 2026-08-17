@@ -232,7 +232,8 @@ jobs:
           $SCP "$GITHUB_WORKSPACE/latest.zip" "$VPS_TARGET:$MIRROR_DIR/dalamud/latest.zip"
 
           # 転送事故を検出する(100MB 級なので必ず照合する)
-          LOCAL=$(sha256sum "$GITHUB_WORKSPACE/latest.zip" | cut -d' ' -f1)
+          # sha256sum の出力に \ が付くこと(パスにバックスラッシュを含む場合)があるので除去する
+          LOCAL=$(sha256sum "$GITHUB_WORKSPACE/latest.zip" | cut -d' ' -f1 | tr -d '\\')
           REMOTE=$($SSH "$VPS_TARGET" "sha256sum $MIRROR_DIR/dalamud/latest.zip | cut -d' ' -f1")
           echo "local =$LOCAL"
           echo "remote=$REMOTE"
