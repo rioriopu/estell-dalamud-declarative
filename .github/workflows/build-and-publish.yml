@@ -86,6 +86,42 @@ jobs:
           "version=$describe-$track.$buildNo" >> $env:GITHUB_OUTPUT
           Write-Host "Resolved version = $describe-$track.$buildNo"
 
+      # 2026-09-27: 本家が NUKE を撤去し(PR #2982)、ビルドが CMake + dotnet build の
+      # 2 段構成になった。あわせて CreateHashList.ps1 が tools/create_hashlist.ps1 へ移動。
+      # 旧 `.\build.ps1 Compile` はもう存在しないので、本家 CI(main.yml)と同じ手順に合わせる。
+      - name: Install CMake
+        shell: pwsh
+        env:
+          CMAKE_VERSION: '4.2.0'
+        run: |
+          $name = "cmake-$env:CMAKE_VERSION-windows-x86_64"
+          $url = "https://cmake.org/files/v$($env:CMAKE_VERSION -replace '\.\d+$', '')"
+          Invoke-WebRequest "$url/$name.zip" -OutFile "$env:RUNNER_TEMP\cmake.zip"
+          Invoke-WebRequest "$url/cmake-$env:CMAKE_VERSION-SHA-256.txt" -OutFile "$env:RUNNER_TEMP\cmake.sha256"
+
+          $expected = (Select-String -Path "$env:RUNNER_TEMP\cmake.sha256" -Pattern "  $name.zip$").Line.Split(' ')[0]
+          $actual = (Get-FileHash "$env:RUNNER_TEMP\cmake.zip" -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw "CMake checksum mismatch: $actual != $expected" }
+
+          Expand-Archive "$env:RUNNER_TEMP\cmake.zip" $env:RUNNER_TEMP
+          "$env:RUNNER_TEMP\$name\bin" >> $env:GITHUB_PATH
+
+      # 本家 CI と同じく、ネイティブのバージョンリソース用に VERSION を置く。
+      - name: Define VERSION
+        working-directory: Dalamud
+        shell: pwsh
+        run: |
+          "Dalamud"                                   >> VERSION
+          "${{ inputs.track }}"                       >> VERSION
+          (git rev-parse --short HEAD).Trim()         >> VERSION
+
+      - name: Build native projects
+        working-directory: Dalamud
+        shell: pwsh
+        run: |
+          cmake --preset vs2022
+          cmake --build build --config Release -- "/clp:NoSummary;ForceNoAlign"
+
       - name: Build Dalamud (Release)
         working-directory: Dalamud
         shell: pwsh
@@ -93,12 +129,14 @@ jobs:
           # MSBuild は環境変数をプロパティとして解決する。Dalamud.csproj の GetVersionData は
           # SCMVersion が空のときだけ git describe を使うので、ここで渡した値が優先される。
           SCMVersion: ${{ steps.ver.outputs.version }}
-        run: .\build.ps1 Compile --configuration Release
+        run: |
+          dotnet build Dalamud/Dalamud.csproj -c Release -tl:off "/clp:NoSummary;ForceNoAlign"
+          dotnet build Dalamud.Injector/Dalamud.Injector.csproj -c Release -tl:off "/clp:NoSummary;ForceNoAlign"
 
       - name: Create hash list
         working-directory: Dalamud
         shell: pwsh
-        run: .\CreateHashList.ps1 .\bin\Release
+        run: .\tools\create_hashlist.ps1 .\bin\Release
 
       - name: Package latest.zip
         working-directory: Dalamud
