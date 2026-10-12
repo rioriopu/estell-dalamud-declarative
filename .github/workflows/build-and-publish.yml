@@ -29,7 +29,9 @@ env:
 
 jobs:
   build-publish:
-    runs-on: windows-2022
+    # 2026-10-12: 本家が VS2026 / v145 へ移行し CMakePresets から vs2022 が消えた。
+    # v145 のツールセットを持つイメージが要るので、本家 CI と同じ windows-2025 に合わせる。
+    runs-on: windows-2025
     steps:
       - name: Checkout declarative (config)
         uses: actions/checkout@v4
@@ -119,7 +121,7 @@ jobs:
         working-directory: Dalamud
         shell: pwsh
         run: |
-          cmake --preset vs2022
+          cmake --preset vs2026
           cmake --build build --config Release -- "/clp:NoSummary;ForceNoAlign"
 
       - name: Build Dalamud (Release)
