@@ -13,7 +13,7 @@ tracks:
     applicableGameVersion: '2026.10.16.0000.0000'
 
     # .NET ランタイム。公式と同じ値にすれば kamori からそのまま取得される。
-    runtimeVersion: 10.0.0
+    runtimeVersion: 10.0.14
     runtimeRequired: true
 
     # 自前トラックは常にベータキー必須(launcher 側で hidden 扱い)。

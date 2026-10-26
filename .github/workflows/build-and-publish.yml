@@ -166,6 +166,12 @@ jobs:
           $desc = [string]$tc.description
           $hidden = [bool]$tc.hidden
 
+          # 公式配信元が旧ランタイムを配信しなくなると、新規導入や再取得だけが失敗する。
+          # 本体ビルドやZIPの検査では検出できないため、公開する前に取得先も確認する。
+          if ($rreq) {
+            & ./declarative/scripts/Test-RuntimeAvailability.ps1 -RuntimeVersion $rv
+          }
+
           $gv = "${{ inputs.game_version }}"
           if ([string]::IsNullOrWhiteSpace($gv)) { $gv = [string]$tc.applicableGameVersion }
 
