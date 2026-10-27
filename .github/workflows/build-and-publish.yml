@@ -27,6 +27,10 @@ env:
   DISTRIB_REPO: rioriopu/estell-dalamud-distrib
   DALAMUD_REPO: rioriopu/Dalamud
 
+concurrency:
+  group: estell-publish-${{ inputs.track || 'estell' }}
+  cancel-in-progress: false
+
 jobs:
   build-publish:
     # 2026-10-12: 本家が VS2026 / v145 へ移行し CMakePresets から vs2022 が消えた。
@@ -135,6 +139,13 @@ jobs:
           dotnet build Dalamud/Dalamud.csproj -c Release -tl:off "/clp:NoSummary;ForceNoAlign"
           dotnet build Dalamud.Injector/Dalamud.Injector.csproj -c Release -tl:off "/clp:NoSummary;ForceNoAlign"
 
+      - name: Test configuration recovery
+        working-directory: Dalamud
+        shell: pwsh
+        env:
+          SCMVersion: ${{ steps.ver.outputs.version }}
+        run: dotnet test Dalamud.Test/Dalamud.Test.csproj -c Release --filter FullyQualifiedName~ConfigurationRecoveryTests -tl:off
+
       - name: Create hash list
         working-directory: Dalamud
         shell: pwsh
@@ -180,7 +191,11 @@ jobs:
           $ver = "${{ steps.ver.outputs.version }}"
           if ([string]::IsNullOrWhiteSpace($ver)) { throw "バージョンが解決できていません" }
 
-          $dl = "https://github.com/$($env:DISTRIB_REPO)/releases/download/$track/latest.zip"
+          if ($ver -notmatch '^[0-9A-Za-z.+_-]+$') { throw "不正な配布バージョン: $ver" }
+          $archiveName = "$ver.zip"
+          $dl = "https://github.com/$($env:DISTRIB_REPO)/releases/download/$track/$archiveName"
+          $mirror = "https://estelldprereleaserepo.net/estell/dalamud/$archiveName"
+          $sha256 = (Get-FileHash "$env:GITHUB_WORKSPACE/latest.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
 
           # --- {track}/version (PascalCase, DalamudVersionInfo) ---
           $versionObj = [ordered]@{
@@ -191,6 +206,8 @@ jobs:
             RuntimeRequired = $rreq
             Key             = $key
             DownloadUrl     = $dl
+            MirrorDownloadUrl = $mirror
+            DownloadSha256  = $sha256
           }
           New-Item -ItemType Directory -Force "distrib/$track" | Out-Null
           ($versionObj | ConvertTo-Json -Compress) | Out-File -Encoding utf8 -NoNewline "distrib/$track/version"
@@ -215,6 +232,7 @@ jobs:
           "track=$track"  >> $env:GITHUB_OUTPUT
           "version=$ver"  >> $env:GITHUB_OUTPUT
           "gamever=$gv"   >> $env:GITHUB_OUTPUT
+          "archive=$archiveName" >> $env:GITHUB_OUTPUT
           Write-Host "Generated $track version=$ver gamever=$gv"
 
       - name: Upload zip to distrib release
@@ -228,7 +246,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             gh release create $track --repo $env:DISTRIB_REPO --title "estell $track" --notes "Auto-published by build-and-publish.yml"
           }
-          gh release upload $track "$env:GITHUB_WORKSPACE\latest.zip" --clobber --repo $env:DISTRIB_REPO
+          # 古いマニフェストが参照するlatest.zipは変更しない。
+          # 版別ZIPを先に公開し、同じURLの中身を後から入れ替えない。
+          $archive = "${{ steps.gen.outputs.archive }}"
+          Copy-Item "$env:GITHUB_WORKSPACE/latest.zip" "$env:GITHUB_WORKSPACE/$archive"
+          gh release upload $track "$env:GITHUB_WORKSPACE/$archive" --repo $env:DISTRIB_REPO
+          if ($LASTEXITCODE -ne 0) { throw "版別ZIPの公開に失敗しました。既存の版別ZIPは上書きしません。" }
 
       - name: Commit & push distrib (version / meta)
         working-directory: distrib
@@ -241,16 +264,15 @@ jobs:
           git push
 
       # GitHub が落ちても配れるよう、自前 VPS にも同じものを置く。
-      # ここが失敗しても GitHub 側の配布は完了しているので、ジョブは落とさない
-      # (continue-on-error)。ミラーが古いままになるだけ。
+      # 本体を検証してから版情報を切り替える。同期の失敗も検出する。
       - name: Mirror to VPS
-        continue-on-error: true
         shell: bash
         env:
           VPS_TARGET: ${{ secrets.VPS_TARGET }}
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
           VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
           MIRROR_DIR: /home/ubuntu/estelld-repo/static/estell
+          ARCHIVE_NAME: ${{ steps.gen.outputs.archive }}
         run: |
           set -euo pipefail
 
@@ -270,20 +292,22 @@ jobs:
 
           $SSH "$VPS_TARGET" "mkdir -p $MIRROR_DIR/dalamud"
 
-          # マニフェスト(数百バイト)。今回の障害で唯一落ちていた部分なので最優先。
-          $SCP distrib/estell/version   "$VPS_TARGET:$MIRROR_DIR/dalamud/version"
-          $SCP distrib/meta.json        "$VPS_TARGET:$MIRROR_DIR/dalamud/meta.json"
-
-          # Dalamud 本体。GitHub Releases が落ちたときの代替。
-          $SCP "$GITHUB_WORKSPACE/latest.zip" "$VPS_TARGET:$MIRROR_DIR/dalamud/latest.zip"
+          # 版別本体を仮転送し、照合後にだけ公開する。
+          $SCP "$GITHUB_WORKSPACE/latest.zip" "$VPS_TARGET:$MIRROR_DIR/dalamud/$ARCHIVE_NAME.upload-$GITHUB_RUN_ID"
 
           # 転送事故を検出する(100MB 級なので必ず照合する)
           # sha256sum の出力に \ が付くこと(パスにバックスラッシュを含む場合)があるので除去する
           LOCAL=$(sha256sum "$GITHUB_WORKSPACE/latest.zip" | cut -d' ' -f1 | tr -d '\\')
-          REMOTE=$($SSH "$VPS_TARGET" "sha256sum $MIRROR_DIR/dalamud/latest.zip | cut -d' ' -f1")
+          REMOTE=$($SSH "$VPS_TARGET" "sha256sum $MIRROR_DIR/dalamud/$ARCHIVE_NAME.upload-$GITHUB_RUN_ID | cut -d' ' -f1")
           echo "local =$LOCAL"
           echo "remote=$REMOTE"
           [ "$LOCAL" = "$REMOTE" ] || { echo "ハッシュ不一致"; exit 1; }
+
+          # 公開済みの同じ版があれば、内容が一致する場合だけ再利用する。
+          $SSH "$VPS_TARGET" "if test -f $MIRROR_DIR/dalamud/$ARCHIVE_NAME; then cmp $MIRROR_DIR/dalamud/$ARCHIVE_NAME $MIRROR_DIR/dalamud/$ARCHIVE_NAME.upload-$GITHUB_RUN_ID; else mv $MIRROR_DIR/dalamud/$ARCHIVE_NAME.upload-$GITHUB_RUN_ID $MIRROR_DIR/dalamud/$ARCHIVE_NAME; fi"
+          $SCP "distrib/${{ steps.gen.outputs.track }}/version" "$VPS_TARGET:$MIRROR_DIR/dalamud/version.upload-$GITHUB_RUN_ID"
+          $SCP distrib/meta.json "$VPS_TARGET:$MIRROR_DIR/dalamud/meta.json.upload-$GITHUB_RUN_ID"
+          $SSH "$VPS_TARGET" "mv $MIRROR_DIR/dalamud/version.upload-$GITHUB_RUN_ID $MIRROR_DIR/dalamud/version; mv $MIRROR_DIR/dalamud/meta.json.upload-$GITHUB_RUN_ID $MIRROR_DIR/dalamud/meta.json"
 
           $SSH "$VPS_TARGET" "date -Is > $MIRROR_DIR/dalamud/last-sync.txt"
           echo "ミラー同期が完了しました"
