@@ -277,8 +277,8 @@ jobs:
           set -euo pipefail
 
           if [ -z "${VPS_SSH_KEY:-}" ] || [ -z "${VPS_TARGET:-}" ]; then
-            echo "VPS の Secrets が未設定のためミラーをスキップします"
-            exit 0
+            echo "VPS の Secrets が未設定のため配布を完了できません"
+            exit 1
           fi
 
           mkdir -p ~/.ssh
